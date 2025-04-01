@@ -448,7 +448,6 @@ def get_followers_list(request, user_id):
 
 #  News Feed API (GET /feed)
 class NewsFeedView(ListAPIView):
-    queryset = Post.objects.select_related('author').prefetch_related('comments', 'liked_by').order_by('-created_at')
     serializer_class = PostSerializer
     pagination_class = StandardResultsSetPagination
     permission_classes = [IsAuthenticated]
@@ -460,21 +459,30 @@ class NewsFeedView(ListAPIView):
     def get_queryset(self):
         user = self.request.user
         filter_type = self.request.query_params.get('filter', None)
-        
-        # Admins see all posts.
+
+        # Base queryset for posts
+        queryset = Post.objects.select_related('author').prefetch_related('comments', 'liked_by')
+
+        # Admins see all posts
         if user.is_superuser:
-            queryset = Post.objects.select_related('author').prefetch_related('comments', 'liked_by').order_by('-created_at')
+            queryset = queryset.order_by('-created_at')
         else:
-            # Regular users see public posts and their own posts.
-            queryset = Post.objects.select_related('author').prefetch_related('comments', 'liked_by').filter(
+            # Regular users see public posts and their own posts
+            queryset = queryset.filter(
                 Q(privacy='public') | Q(author=user)
             ).order_by('-created_at')
-        
+
+        # Filter: Liked posts
         if filter_type == "liked":
             queryset = queryset.filter(liked_by=user)
+
+        # Filter: Posts from followed users
         elif filter_type == "following" and not user.is_superuser:
-            followed_users = user.following.values_list('id', flat=True)  
-            queryset = queryset.filter(author__id__in=followed_users)
+            if hasattr(user, 'following'):  # Check if following exists
+                followed_users = user.following.values_list('id', flat=True)
+                queryset = queryset.filter(author__id__in=followed_users)
+            else:
+                queryset = Post.objects.none()  # If no following field, return empty queryset
 
         return queryset
 
