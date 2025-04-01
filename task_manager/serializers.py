@@ -47,14 +47,12 @@ class PostSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Post
-        fields = ['id', 'title', 'content', 'created_at', 'total_likes', 'liked_by_user', 'author_username']
+        fields = ['id', 'title', 'content', 'privacy', 'created_at', 'total_likes', 'liked_by_user', 'author_username']
 
     def get_total_likes(self, obj):
-        """Returns the number of likes on the post."""
         return obj.liked_by.count()
 
     def get_liked_by_user(self, obj):
-        """Returns True if the authenticated user liked the post."""
         request = self.context.get("request")
         if request and request.user.is_authenticated:
             return obj.liked_by.filter(id=request.user.id).exists()
