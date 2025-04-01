@@ -87,13 +87,34 @@ class ProtectedView(APIView):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def create_user(request):
-    """Create a new user and generate an authentication token."""
+    print("create_user() was triggered!")
+
     serializer = UserSerializer(data=request.data)
+
     if serializer.is_valid():
-        user = serializer.save()
-        token, created = Token.objects.get_or_create(user=user)
-        return Response({"user": serializer.data, "token": token.key}, status=201)
-    return Response(serializer.errors, status=400)
+        print("Serializer is VALID")
+        print(f"Data to save: {serializer.validated_data}") 
+
+        
+        try:
+            user = User.objects.create_user(**serializer.validated_data)  
+            print(" User created successfully!")
+
+            token, created = Token.objects.get_or_create(user=user)
+            return Response({
+                "user": serializer.data,
+                "token": token.key
+            }, status=201)
+        except Exception as e:
+            print(f"Exception during save: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return Response({"error": "Internal server error during user save."}, status=500)
+    else:
+        print("Serializer is NOT valid:")
+        print(serializer.errors)
+        return Response(serializer.errors, status=400)
+
 
 #  Get All Users (Admin Only)
 @api_view(['GET'])
@@ -114,11 +135,16 @@ def get_users(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_user_details(request, user_id):
-    """Retrieve details of a specific user."""
+    """Retrieve details of a specific user — accessible only by admin or the user themselves."""
+
     try:
         user = User.objects.get(id=user_id)
     except User.DoesNotExist:
         return Response({"error": "User not found"}, status=404)
+
+    
+    if request.user != user and not request.user.is_staff:
+        return Response({"error": "You do not have permission to view this user's details :P."}, status=403)
 
     serializer = UserSerializer(user)
     return Response(serializer.data, status=200)
@@ -141,15 +167,24 @@ def verify_email(request, user_id):
 @api_view(['DELETE'])
 @permission_classes([IsAuthenticated])
 def delete_user(request, user_id):
-    """Delete a user by ID (Admin Only)."""
-    if not request.user.is_superuser:
-        return Response({"error": "Only administrators can delete users"}, status=403)
+    """
+    Delete a user account.
+    - A user can delete their own account.
+    - An admin (superuser) can delete any account.
+    Otherwise, return a 403 Forbidden error.
+    """
     try:
-        user = User.objects.get(id=user_id)
-        user.delete()
-        return Response({"message": f"User {user.username} has been deleted successfully."}, status=200)
+        target_user = User.objects.get(id=user_id)
     except User.DoesNotExist:
         return Response({"error": "User not found"}, status=404)
+    
+    # Allow deletion if the current user is the target user or if they are an admin.
+    if request.user != target_user and not request.user.is_superuser:
+        return Response({"error": "You do not have permission to delete this user."}, status=403)
+    
+    target_user.delete()
+    return Response({"message": f"User {target_user.username} has been deleted successfully."}, status=200)
+
 
 
 # Like/Unlike Post
@@ -192,15 +227,22 @@ def delete_post(request, post_id):
 
 # Get All Posts 
 @api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def get_posts(request):
-    """Retrieve all posts with pagination."""
+    """Retrieve posts with pagination. Admins get all posts, users get only their own."""
+
     paginator = PageNumberPagination()
     paginator.page_size = 10  
 
-    posts = Post.objects.all().order_by('-created_at')  
-    paginated_posts = paginator.paginate_queryset(posts, request)
+    # If admin, get all posts; else, get only their own posts
+    if request.user.is_staff:
+        posts = Post.objects.all().order_by('-created_at')
+    else:
+        posts = Post.objects.filter(author=request.user).order_by('-created_at')
 
+    paginated_posts = paginator.paginate_queryset(posts, request)
     serializer = PostSerializer(paginated_posts, many=True)
+
     return paginator.get_paginated_response(serializer.data)
 
 # Create Comment
@@ -228,11 +270,21 @@ def get_comments(request, post_id):
 # Delete Comment (Only Author Can Delete)
 @api_view(['DELETE'])
 @permission_classes([IsAuthenticated])
-def delete_comment(request, comment_id):
-    """Delete a comment (only if the user is the author)."""
-    comment = get_object_or_404(Comment, id=comment_id, user=request.user)
+def delete_comment(request, post_id, comment_id):
+    """
+    Delete a comment if:
+      - The current user is the comment author, OR
+      - The current user is the author of the post that the comment belongs to.
+    The URL includes both the post_id and comment_id to ensure the comment belongs to that post.
+    """
+    comment = get_object_or_404(Comment, id=comment_id, post__id=post_id)
+    
+    if request.user != comment.user and request.user != comment.post.author:
+        return Response({"error": "You are not allowed to delete this comment."}, status=403)
+    
     comment.delete()
     return Response({"message": "Comment deleted successfully"}, status=200)
+
 
 
 #Singleton
@@ -304,28 +356,33 @@ class StandardResultsSetPagination(PageNumberPagination):
     page_size_query_param = 'page_size'
     max_page_size = 50
 
-#  News Feed API (GET /feed)
-class NewsFeedView(ListAPIView):
-    serializer_class = PostSerializer
-    permission_classes = [IsAuthenticated]
-    pagination_class = StandardResultsSetPagination
 
-    def get_queryset(self):
-        user = self.request.user
-        filter_type = self.request.query_params.get('filter', None)  
-        
-        queryset = Post.objects.select_related('author').prefetch_related('liked_by').order_by('-created_at')
 
-        if filter_type == "following":
-            followed_users = user.following.all()  
-            queryset = queryset.filter(author__in=followed_users)  
+#To Get OWN POSTS
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_my_posts(request):
+    """
+    Retrieve posts created by the logged-in user.
+    """
+    my_posts = Post.objects.filter(author=request.user).order_by('-created_at')
+    serializer = PostSerializer(my_posts, many=True, context={'request': request})
+    return Response(serializer.data, status=200)
 
-        elif filter_type == "liked":
-            queryset = queryset.filter(liked_by=user)  
 
-        return queryset
 
-    
+#TO GET OWN COMMENT
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_my_comments(request):
+    """
+    Retrieve all comments created by the logged-in user.
+    """
+    my_comments = Comment.objects.filter(user=request.user).order_by('-created_at')
+    serializer = CommentSerializer(my_comments, many=True, context={'request': request})
+    return Response(serializer.data, status=200)
+
+
 #toggle_like_post 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -366,18 +423,62 @@ def toggle_follow(request, user_id):
 #TO get following list
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-def get_following_list(request, user_id):
-    """Retrieve the list of users a person follows."""
-    user = get_object_or_404(User, id=user_id)
-    following = user.following.all()
-    
-    serializer = UserSerializer(following, many=True)
+def get_followers_list(request, user_id):
+    """
+    Retrieve the list of followers for a user.
+    - Admins can view the followers list for any user.
+    - Regular users can only view their own followers.
+    """
+    target_user = get_object_or_404(User, id=user_id)
+
+    # If the requester is not an admin, they can only see their own followers.
+    if not request.user.is_superuser and target_user != request.user:
+        return Response({"error": "You do not have permission to view another user's followers."}, status=403)
+
+    # 'followers' is defined as the reverse relation on the following field.
+    followers = target_user.followers.all()
+    serializer = UserSerializer(followers, many=True, context={'request': request})
     return Response(serializer.data, status=200)
 
-class StandardResultsSetPagination(PageNumberPagination):
-    page_size = 10  # Number of posts per page
-    page_size_query_param = 'page_size'
-    max_page_size = 50
+
+    class StandardResultsSetPagination(PageNumberPagination):
+        page_size = 10  # Number of posts per page
+        page_size_query_param = 'page_size'
+        max_page_size = 50
+
+#  News Feed API (GET /feed)
+class NewsFeedView(ListAPIView):
+    queryset = Post.objects.select_related('author').prefetch_related('comments', 'liked_by').order_by('-created_at')
+    serializer_class = PostSerializer
+    pagination_class = StandardResultsSetPagination
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        print("NewsFeedView executed (not cached)")
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        user = self.request.user
+        filter_type = self.request.query_params.get('filter', None)
+        
+        # Admins see all posts.
+        if user.is_superuser:
+            queryset = Post.objects.select_related('author').prefetch_related('comments', 'liked_by').order_by('-created_at')
+        else:
+            # Regular users see public posts and their own posts.
+            queryset = Post.objects.select_related('author').prefetch_related('comments', 'liked_by').filter(
+                Q(privacy='public') | Q(author=user)
+            ).order_by('-created_at')
+        
+        if filter_type == "liked":
+            queryset = queryset.filter(liked_by=user)
+        elif filter_type == "following" and not user.is_superuser:
+            followed_users = user.following.values_list('id', flat=True)  
+            queryset = queryset.filter(author__id__in=followed_users)
+
+        return queryset
+
+
 
 @method_decorator(cache_page(60 * 2), name='dispatch')  
 class NewsFeedView(ListAPIView):
