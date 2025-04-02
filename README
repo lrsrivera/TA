@@ -1,6 +1,9 @@
 Task Manager Project
 This project is a simple task management system that features privacy settings and role-based access control (RBAC) along with some performance optimizations.
 
+Access Diagrams and Postman results here: https://docs.google.com/spreadsheets/d/1KkPTgwZm0UHt0a7gaKukNsdX87D20XqtG-6BQ37DcHQ/edit?usp=sharing
+
+
 Privacy Settings and Role-Based Access Control (RBAC)
 We implemented privacy and RBAC features in several parts of the project:
 
